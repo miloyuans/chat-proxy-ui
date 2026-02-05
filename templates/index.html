@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grok-Like Chat Proxy</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.0.2/marked.min.js"></script> <!-- Markdown 渲染 -->
+    <script src="/static/js/script.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- 左侧历史列表（模仿 Grok 的侧边栏，只显示当前用户历史） -->
+        <aside class="sidebar">
+            <h2>Chat History</h2>
+            <ul id="history-list"></ul>
+        </aside>
+
+        <!-- 中间聊天区 -->
+        <main class="chat-window">
+            <div id="messages"></div>
+            <div class="input-area">
+                <textarea id="input" placeholder="Type your message..."></textarea>
+                <button id="send">Send</button>
+            </div>
+        </main>
+
+        <!-- 右侧设置（简化版，模型选择等） -->
+        <aside class="settings">
+            <h2>Settings</h2>
+            <select id="model">
+                <option value="gpt-4o">GPT-4o</option>
+                <option value="gpt-4">GPT-4</option>
+            </select>
+            <!-- 可以加更多设置 -->
+        </aside>
+    </div>
+</body>
+</html>
