@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/sessions"
@@ -115,33 +116,53 @@ func adminMiddleware() gin.HandlerFunc {
 }
 
 // 模拟登录 ChatGPT Pro（每个用户独立）
+// loginToChatGPT performs login and returns the session token (from cookies)
 func loginToChatGPT(username, password string) (string, error) {
-	ctx, cancel := chromedp.NewContext(context.Background())
-	defer cancel()
+    ctx, cancel := chromedp.NewContext(context.Background())
+    defer cancel()
 
-	var cookies []*http.Cookie
-	err := chromedp.Run(ctx,
-		chromedp.Navigate("https://chat.openai.com/auth/login"),
-		chromedp.Sleep(2*time.Second),
-		chromedp.SendKeys(`input[name="username"]`, username),
-		chromedp.Click(`button[type="submit"]`),
-		chromedp.Sleep(2*time.Second),
-		chromedp.SendKeys(`input[name="password"]`, password),
-		chromedp.Click(`button[type="submit"]`),
-		chromedp.Sleep(5*time.Second),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return chromedp.Cookies("https://chat.openai.com", &cookies).Do(ctx)
-		}),
-	)
-	if err != nil {
-		return "", err
-	}
-	for _, cookie := range cookies {
-		if strings.Contains(cookie.Name, "session-token") {
-			return cookie.Value, nil
-		}
-	}
-	return "", fmt.Errorf("session token not found")
+    var sessionToken string
+
+    err := chromedp.Run(ctx,
+        chromedp.Navigate("https://chat.openai.com/auth/login"),
+        chromedp.Sleep(2*time.Second),
+
+        chromedp.SendKeys(`input[name="username"]`, username, chromedp.ByQuery),
+        chromedp.Click(`button[type="submit"]`, chromedp.ByQuery),
+        chromedp.Sleep(2*time.Second),
+
+        chromedp.SendKeys(`input[name="password"]`, password, chromedp.ByQuery),
+        chromedp.Click(`button[type="submit"]`, chromedp.ByQuery),
+        chromedp.Sleep(8*time.Second), // Give enough time for login redirect / 2FA if any
+
+        // Extract cookies using network.GetCookies()
+        chromedp.ActionFunc(func(ctx context.Context) error {
+            // Get cookies for the current domain
+            cookies, err := network.GetCookies().WithUrls([]string{"https://chat.openai.com"}).Do(ctx)
+            if err != nil {
+                return err
+            }
+
+            for _, cookie := range cookies {
+                // Look for the session token cookie (name usually contains "session-token" or "__Secure-next-auth.session-token")
+                if strings.Contains(cookie.Name, "session-token") || strings.Contains(cookie.Name, "next-auth.session-token") {
+                    sessionToken = cookie.Value
+                    break
+                }
+            }
+
+            if sessionToken == "" {
+                return fmt.Errorf("session token cookie not found in response")
+            }
+            return nil
+        }),
+    )
+
+    if err != nil {
+        return "", fmt.Errorf("login failed: %w", err)
+    }
+
+    return sessionToken, nil
 }
 
 // 获取用户 session token（隔离存储）
