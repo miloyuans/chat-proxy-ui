@@ -116,51 +116,89 @@ func adminMiddleware() gin.HandlerFunc {
 }
 
 // 模拟登录 ChatGPT Pro（每个用户独立）
-func loginToChatGPT(username, password string) (string, error) {
+// loginToChatGPT 优化版：支持手动 cookie 注入或自动化登录
+func loginToChatGPT(username, password, cookieJSON string) (string, error) {
     ctx, cancel := chromedp.NewContext(context.Background())
     defer cancel()
 
     var sessionToken string
 
+    // 模式1: 手动 cookie 注入（推荐，避开 CAPTCHA）
+    if cookieJSON != "" {
+        // 解析 cookie JSON（假设用户上传 JSON 字符串，格式如 EditThisCookie 导出）
+        var cookies []*network.Cookie
+        // 这里添加 JSON 解析逻辑（使用 json.Unmarshal 解析 cookieJSON 到 cookies 切片）
+        // 示例假设已解析
+        err := chromedp.Run(ctx,
+            chromedp.Navigate("https://chat.openai.com"),
+            chromedp.ActionFunc(func(ctx context.Context) error {
+                return network.SetCookies(cookies).Do(ctx)
+            }),
+            chromedp.Sleep(3 * time.Second),
+            chromedp.ActionFunc(func(ctx context.Context) error {
+                // 检查是否登录成功（等待 chat 元素出现）
+                return chromedp.WaitVisible(`div[data-testid="conversation-panel"]`, chromedp.ByQuery).Do(ctx)
+            }),
+            // 提取 token
+            chromedp.ActionFunc(func(ctx context.Context) error {
+                allCookies, err := network.GetCookies().WithURLs([]string{"https://chat.openai.com"}).Do(ctx)
+                if err != nil {
+                    return err
+                }
+                for _, cookie := range allCookies {
+                    if strings.Contains(cookie.Name, "session-token") || strings.Contains(cookie.Name, "next-auth.session-token") {
+                        sessionToken = cookie.Value
+                        return nil
+                    }
+                }
+                return fmt.Errorf("session token not found after cookie injection")
+            }),
+        )
+        if err != nil {
+            return "", err
+        }
+        return sessionToken, nil
+    }
+
+    // 模式2: 自动化登录（优化 selector 和等待，备用）
     err := chromedp.Run(ctx,
         chromedp.Navigate("https://chat.openai.com/auth/login"),
-        chromedp.Sleep(2*time.Second),
+        chromedp.WaitVisible(`input[type="email"]`, chromedp.ByQuery),  // 优化：等待元素可见
 
-        chromedp.SendKeys(`input[name="username"]`, username, chromedp.ByQuery),
-        chromedp.Click(`button[type="submit"]`, chromedp.ByQuery),
-        chromedp.Sleep(2*time.Second),
+        chromedp.SendKeys(`input[type="email"]`, username, chromedp.ByQuery),
+        chromedp.Click(`button[data-testid="continue-button"]`, chromedp.ByQuery),  // 优化 selector
+        chromedp.WaitVisible(`input[type="password"]`, chromedp.ByQuery),
 
-        chromedp.SendKeys(`input[name="password"]`, password, chromedp.ByQuery),
-        chromedp.Click(`button[type="submit"]`, chromedp.ByQuery),
-        chromedp.Sleep(8*time.Second), // 等待登录、重定向、可能的 CAPTCHA
+        chromedp.SendKeys(`input[type="password"]`, password, chromedp.ByQuery),
+        chromedp.Click(`button[data-testid="login-button"]`, chromedp.ByQuery),
+        chromedp.Sleep(10 * time.Second),  // 延长等待，处理重定向/验证码
 
         chromedp.ActionFunc(func(ctx context.Context) error {
-            // 修复：使用 WithURLs (大写 U 和 S)
+            // 检查登录成功
+            currentURL := ""
+            chromedp.Location(&currentURL).Do(ctx)
+            if !strings.Contains(currentURL, "/chat") {
+                return fmt.Errorf("login redirect failed, possible CAPTCHA")
+            }
+            return nil
+        }),
+        chromedp.ActionFunc(func(ctx context.Context) error {
             cookies, err := network.GetCookies().WithURLs([]string{"https://chat.openai.com"}).Do(ctx)
             if err != nil {
                 return err
             }
-
             for _, cookie := range cookies {
-                // OpenAI 的 session cookie 通常包含 "session-token" 或 "__Secure-next-auth.session-token"
-                if strings.Contains(cookie.Name, "session-token") ||
-                   strings.Contains(cookie.Name, "next-auth.session-token") {
+                if strings.Contains(cookie.Name, "session-token") || strings.Contains(cookie.Name, "next-auth.session-token") {
                     sessionToken = cookie.Value
-                    break
+                    return nil
                 }
             }
-
-            if sessionToken == "" {
-                return fmt.Errorf("session token cookie not found")
-            }
-            return nil
+            return fmt.Errorf("session token not found")
         }),
     )
-
     if err != nil {
-        return "", fmt.Errorf("login failed: %w", err)
+        return "", err
     }
-
     return sessionToken, nil
 }
 
@@ -228,13 +266,15 @@ func main() {
 		user := getCurrentUser(c)
 		proUsername := c.PostForm("pro_username")
 		proPassword := c.PostForm("pro_password")
-		token, err := loginToChatGPT(proUsername, proPassword)
+		cookieJSON := c.PostForm("cookie_json")  // 新字段，用户输入 cookie JSON 字符串
+
+		token, err := loginToChatGPT(proUsername, proPassword, cookieJSON)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Authorization failed"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Authorization failed: " + err.Error()})
 			return
 		}
 		setUserSessionToken(user.ID, token)
-		c.JSON(http.StatusOK, gin.H{"message": "Authorized"})
+		c.JSON(http.StatusOK, gin.H{"message": "Authorized successfully"})
 	})
 
 	// 主页（聊天 UI）

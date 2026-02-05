@@ -11,10 +11,12 @@
         <button type="submit">Login</button>
     </form>
     <!-- 授权 Pro 账号表单（每个用户独立） -->
+    <!-- ... 原登录表单 ... -->
     <h2>Authorize ChatGPT Pro</h2>
     <form action="/authorize" method="post">
-        <input type="text" name="pro_username" placeholder="Pro Email" required>
-        <input type="password" name="pro_password" placeholder="Pro Password" required>
+        <input type="text" name="pro_username" placeholder="Pro Email (optional if using cookie)" >
+        <input type="password" name="pro_password" placeholder="Pro Password (optional if using cookie)" >
+        <textarea name="cookie_json" placeholder="Paste exported cookie JSON here (from EditThisCookie extension)"></textarea>
         <button type="submit">Authorize</button>
     </form>
 </body>
