@@ -24,7 +24,7 @@ import (
 // 全局变量
 var (
 	db           *sql.DB
-	store        = sessions.NewCookieStore([]byte("secret-key")) // 会话存储
+	store        = sessions.NewCookieStore([]byte("secret-key")) // 会话存储密钥，生产环境请改成安全的随机值
 	sessionMutex sync.Mutex                              // 会话锁
 )
 
@@ -65,7 +65,7 @@ func initDB() {
 	if err != nil {
 		panic(err)
 	}
-	// 创建默认超管（用户名: admin, 密码: admin123，实际生产改）
+	// 创建默认超管（用户名: admin, 密码: admin123，生产环境请修改）
 	hash := sha256.Sum256([]byte("admin123"))
 	_, _ = db.Exec("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", "admin", hex.EncodeToString(hash[:]), "admin")
 }
@@ -76,7 +76,7 @@ func hashPassword(pass string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// 获取当前用户
+// 获取当前登录用户
 func getCurrentUser(c *gin.Context) *User {
 	session, _ := store.Get(c.Request, "session")
 	userID, ok := session.Values["user_id"].(int)
@@ -91,7 +91,7 @@ func getCurrentUser(c *gin.Context) *User {
 	return &user
 }
 
-// 中间件：检查登录
+// 中间件：必须登录
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if getCurrentUser(c) == nil {
@@ -103,7 +103,7 @@ func authMiddleware() gin.HandlerFunc {
 	}
 }
 
-// 中间件：检查超管
+// 中间件：仅超管
 func adminMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user := getCurrentUser(c)
@@ -116,93 +116,54 @@ func adminMiddleware() gin.HandlerFunc {
 	}
 }
 
-// loginToChatGPT 优化版：支持手动 cookie 注入或自动化登录
-func loginToChatGPT(username, password, cookieJSON string) (string, error) {
-    ctx, cancel := chromedp.NewContext(context.Background())
-    defer cancel()
+// 使用手动导出的 Cookie JSON 进行授权（最稳定方式）
+func authorizeWithCookieJSON(cookieJSON string) (string, error) {
+	if cookieJSON == "" {
+		return "", fmt.Errorf("cookie_json is required")
+	}
 
-    var sessionToken string
+	var cookieParams []*network.CookieParam
+	if err := json.Unmarshal([]byte(cookieJSON), &cookieParams); err != nil {
+		return "", fmt.Errorf("invalid cookie json format: %w", err)
+	}
 
-    // 模式1: 手动 cookie 注入（推荐，避开 CAPTCHA）
-    if cookieJSON != "" {
-        // 解析 cookie JSON 到 []*network.CookieParam
-        var cookieParams []*network.CookieParam
-        if err := json.Unmarshal([]byte(cookieJSON), &cookieParams); err != nil {
-            return "", fmt.Errorf("invalid cookie json: %w", err)
-        }
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
 
-        err := chromedp.Run(ctx,
-            chromedp.Navigate("https://chat.openai.com"),
-            chromedp.ActionFunc(func(ctx context.Context) error {
-                return network.SetCookies(cookieParams).Do(ctx)
-            }),
-            chromedp.Sleep(3 * time.Second),
-            // 验证是否登录成功（等待聊天面板元素出现）
-            chromedp.WaitVisible(`div[data-testid="conversation-panel"]`, chromedp.ByQuery),
-            // 提取 token
-            chromedp.ActionFunc(func(ctx context.Context) error {
-                cookies, err := network.GetCookies().WithURLs([]string{"https://chat.openai.com"}).Do(ctx)
-                if err != nil {
-                    return err
-                }
-                for _, cookie := range cookies {
-                    if strings.Contains(cookie.Name, "session-token") || strings.Contains(cookie.Name, "next-auth.session-token") {
-                        sessionToken = cookie.Value
-                        return nil
-                    }
-                }
-                return fmt.Errorf("session token not found after cookie injection")
-            }),
-        )
-        if err != nil {
-            return "", err
-        }
-        return sessionToken, nil
-    }
+	var sessionToken string
 
-    // 模式2: 自动化登录（优化 selector 和等待，备用）
-    err := chromedp.Run(ctx,
-        chromedp.Navigate("https://chat.openai.com/auth/login"),
-        chromedp.WaitVisible(`input[type="email"]`, chromedp.ByQuery),  // 等待元素可见
+	err := chromedp.Run(ctx,
+		chromedp.Navigate("https://chat.openai.com"),
+		network.SetCookies(cookieParams),
+		chromedp.Sleep(3*time.Second),
 
-        chromedp.SendKeys(`input[type="email"]`, username, chromedp.ByQuery),
-        chromedp.Click(`button:has-text("Continue")`, chromedp.ByQuery),  // 优化 selector
-        chromedp.WaitVisible(`input[type="password"]`, chromedp.ByQuery),
+		// 验证是否登录成功（等待聊天界面元素出现）
+		chromedp.WaitVisible(`div[data-testid="conversation-panel"]`, chromedp.ByQuery),
 
-        chromedp.SendKeys(`input[type="password"]`, password, chromedp.ByQuery),
-        chromedp.Click(`button:has-text("Log in")`, chromedp.ByQuery),
-        chromedp.Sleep(10 * time.Second),  // 延长等待，处理重定向/验证码
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			cookies, err := network.GetCookies().WithURLs([]string{"https://chat.openai.com"}).Do(ctx)
+			if err != nil {
+				return err
+			}
+			for _, cookie := range cookies {
+				if strings.Contains(cookie.Name, "session-token") ||
+					strings.Contains(cookie.Name, "next-auth.session-token") {
+					sessionToken = cookie.Value
+					return nil
+				}
+			}
+			return fmt.Errorf("session token not found after setting cookies")
+		}),
+	)
 
-        chromedp.ActionFunc(func(ctx context.Context) error {
-            // 检查登录成功
-            currentURL := ""
-            chromedp.Location(&currentURL).Do(ctx)
-            if !strings.Contains(currentURL, "/chat") {
-                return fmt.Errorf("login redirect failed, possible CAPTCHA")
-            }
-            return nil
-        }),
-        chromedp.ActionFunc(func(ctx context.Context) error {
-            cookies, err := network.GetCookies().WithURLs([]string{"https://chat.openai.com"}).Do(ctx)
-            if err != nil {
-                return err
-            }
-            for _, cookie := range cookies {
-                if strings.Contains(cookie.Name, "session-token") || strings.Contains(cookie.Name, "next-auth.session-token") {
-                    sessionToken = cookie.Value
-                    return nil
-                }
-            }
-            return fmt.Errorf("session token not found")
-        }),
-    )
-    if err != nil {
-        return "", err
-    }
-    return sessionToken, nil
+	if err != nil {
+		return "", fmt.Errorf("failed to set cookies or verify login: %w", err)
+	}
+
+	return sessionToken, nil
 }
 
-// 获取用户 session token（隔离存储）
+// 获取用户 session token
 func getUserSessionToken(userID int) string {
 	sessionMutex.Lock()
 	defer sessionMutex.Unlock()
@@ -247,11 +208,11 @@ func main() {
 		c.Redirect(http.StatusFound, "/")
 	})
 
-	// 注册（仅超管允许，或关闭）
+	// 注册（仅超管）
 	r.POST("/register", adminMiddleware(), func(c *gin.Context) {
 		username := c.PostForm("username")
 		password := c.PostForm("password")
-		role := "user" // 默认普通用户
+		role := "user"
 		hash := hashPassword(password)
 		_, err := db.Exec("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", username, hash, role)
 		if err != nil {
@@ -261,28 +222,27 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "User registered"})
 	})
 
-	// 授权 Pro 账号（每个用户独立授权）
+	// 授权 ChatGPT Pro（手动 Cookie JSON 注入）
 	r.POST("/authorize", authMiddleware(), func(c *gin.Context) {
 		user := getCurrentUser(c)
-		proUsername := c.PostForm("pro_username")
-		proPassword := c.PostForm("pro_password")
-		cookieJSON := c.PostForm("cookie_json")  // 新字段，用户输入 cookie JSON 字符串
+		cookieJSON := c.PostForm("cookie_json")
 
-		token, err := loginToChatGPT(proUsername, proPassword, cookieJSON)
+		token, err := authorizeWithCookieJSON(cookieJSON)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Authorization failed: " + err.Error()})
 			return
 		}
+
 		setUserSessionToken(user.ID, token)
 		c.JSON(http.StatusOK, gin.H{"message": "Authorized successfully"})
 	})
 
-	// 主页（聊天 UI）
+	// 主页（聊天界面）
 	r.GET("/", authMiddleware(), func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", nil)
 	})
 
-	// 聊天代理（使用用户自己的 session token）
+	// 聊天代理
 	r.POST("/chat", authMiddleware(), func(c *gin.Context) {
 		user := getCurrentUser(c)
 		var reqBody struct {
@@ -293,12 +253,12 @@ func main() {
 			return
 		}
 
-		// 保存用户消息到隔离历史
+		// 保存用户消息
 		_, _ = db.Exec("INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)", user.ID, "user", reqBody.Message)
 
 		token := getUserSessionToken(user.ID)
 		if token == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "No session token, authorize first"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "No session token, please authorize first"})
 			return
 		}
 
@@ -316,7 +276,6 @@ func main() {
 		}
 		defer resp.Body.Close()
 
-		// 流式响应，并保存助理消息
 		var assistantMsg string
 		c.Stream(func(w io.Writer) bool {
 			buf := make([]byte, 512)
@@ -328,13 +287,12 @@ func main() {
 			if err == nil {
 				return true
 			}
-			// 保存到历史
 			_, _ = db.Exec("INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)", user.ID, "assistant", assistantMsg)
 			return false
 		})
 	})
 
-	// 获取聊天历史（隔离：只返回当前用户的历史）
+	// 获取当前用户聊天历史
 	r.GET("/history", authMiddleware(), func(c *gin.Context) {
 		user := getCurrentUser(c)
 		rows, err := db.Query("SELECT role, content, timestamp FROM chat_history WHERE user_id = ? ORDER BY timestamp", user.ID)
@@ -343,16 +301,21 @@ func main() {
 			return
 		}
 		defer rows.Close()
+
 		var history []map[string]string
 		for rows.Next() {
 			var role, content, timestamp string
 			rows.Scan(&role, &content, &timestamp)
-			history = append(history, map[string]string{"role": role, "content": content, "timestamp": timestamp})
+			history = append(history, map[string]string{
+				"role":      role,
+				"content":   content,
+				"timestamp": timestamp,
+			})
 		}
 		c.JSON(http.StatusOK, history)
 	})
 
-	// 管理界面（仅超管）：列出用户等
+	// 管理用户（仅超管）
 	r.GET("/admin/users", adminMiddleware(), func(c *gin.Context) {
 		rows, err := db.Query("SELECT id, username, role FROM users")
 		if err != nil {
@@ -360,6 +323,7 @@ func main() {
 			return
 		}
 		defer rows.Close()
+
 		var users []User
 		for rows.Next() {
 			var user User
