@@ -1,9 +1,9 @@
 module chat-proxy-ui
 
-go 1.21
+go 1.22
 
 require (
-	github.com/chromedp/chromedp v0.9.5
+	github.com/chromedp/chromedp v0.13.2 // 或更高版本，例如 @latest
 	github.com/gin-gonic/gin v1.10.0
 	github.com/gorilla/sessions v1.4.0
 	github.com/mattn/go-sqlite3 v1.14.22
@@ -15,7 +15,7 @@ require (
 	github.com/bytedance/sonic/loader v0.1.1 // indirect
 	github.com/chenzhuoyu/base64x v0.0.0-20230717121745-296ad89f973d // indirect
 	github.com/chenzhuoyu/iasm v0.9.0 // indirect
-	github.com/chromedp/cdproto v0.0.0-20240810084446-b31d2c2a5d83 // indirect
+	github.com/chromedp/cdproto v0.0.0-20250319123456-... // chromedp 会自动更新为有效 commit
 	github.com/chromedp/sysutil v1.0.0 // indirect
 	github.com/cloudwego/base64x v0.1.4 // indirect
 	github.com/cloudwego/iasm v0.2.0 // indirect
